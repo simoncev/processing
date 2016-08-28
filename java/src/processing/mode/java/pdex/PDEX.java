@@ -24,10 +24,12 @@ import java.awt.GraphicsEnvironment;
 import java.awt.Rectangle;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
+import java.awt.event.InputEvent;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.awt.event.MouseWheelEvent;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -41,6 +43,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -69,6 +72,7 @@ import javax.swing.tree.TreeModel;
 import processing.app.Language;
 import processing.app.Messages;
 import processing.app.Platform;
+import processing.app.Problem;
 import processing.app.Sketch;
 import processing.app.SketchCode;
 import processing.app.syntax.SyntaxDocument;
@@ -149,6 +153,7 @@ public class PDEX {
 
 
   public void preferencesChanged() {
+    errorChecker.preferencesChanged();
     sketchChanged();
   }
 
@@ -179,10 +184,17 @@ public class PDEX {
 
   private class InspectMode {
 
-    boolean isMouseDown;
-    boolean isCtrlDown;
-    boolean isMetaDown;
     boolean inspectModeEnabled;
+
+    boolean isMouse1Down;
+    boolean isMouse2Down;
+    boolean isHotkeyDown;
+
+    Predicate<MouseEvent> mouseEventHotkeyTest = Platform.isMacOS() ?
+        InputEvent::isMetaDown : InputEvent::isControlDown;
+    Predicate<KeyEvent> keyEventHotkeyTest = Platform.isMacOS() ?
+        e -> e.getKeyCode() == KeyEvent.VK_META :
+        e -> e.getKeyCode() == KeyEvent.VK_CONTROL;
 
     JavaEditor editor;
     PreprocessingService pps;
@@ -191,46 +203,74 @@ public class PDEX {
       this.editor = editor;
       this.pps = pps;
 
-      // Add ctrl+click listener
+      // Add listeners
+
       editor.getJavaTextArea().getPainter().addMouseListener(new MouseAdapter() {
         @Override
         public void mousePressed(MouseEvent e) {
-          isMouseDown = true;
+          isMouse1Down = isMouse1Down || (e.getButton() == MouseEvent.BUTTON1);
+          isMouse2Down = isMouse2Down || (e.getButton() == MouseEvent.BUTTON2);
         }
 
         @Override
-        public void mouseReleased(MouseEvent evt) {
-          isMouseDown = false;
-          if (inspectModeEnabled && evt.getButton() == MouseEvent.BUTTON1) {
-            handleInspect(evt);
-          } else if (!inspectModeEnabled && evt.getButton() == MouseEvent.BUTTON2) {
-            handleInspect(evt);
+        public void mouseReleased(MouseEvent e) {
+          boolean releasingMouse1 = e.getButton() == MouseEvent.BUTTON1;
+          boolean releasingMouse2 = e.getButton() == MouseEvent.BUTTON2;
+          if (JavaMode.inspectModeHotkeyEnabled && inspectModeEnabled &&
+              isMouse1Down && releasingMouse1) {
+            handleInspect(e);
+          } else if (!inspectModeEnabled && isMouse2Down && releasingMouse2) {
+            handleInspect(e);
           }
-          checkInspectMode();
+          isMouse1Down = isMouse1Down && !releasingMouse1;
+          isMouse2Down = isMouse2Down && !releasingMouse2;
+        }
+      });
+
+      editor.getJavaTextArea().getPainter().addMouseMotionListener(new MouseAdapter() {
+        @Override
+        public void mouseDragged(MouseEvent e) {
+          if (editor.isSelectionActive()) {
+            // Mouse was dragged too much, disable
+            inspectModeEnabled = false;
+            // Cancel possible mouse 2 press
+            isMouse2Down = false;
+          }
+        }
+
+        @Override
+        public void mouseMoved(MouseEvent e) {
+          isMouse1Down = false;
+          isMouse2Down = false;
+          isHotkeyDown = mouseEventHotkeyTest.test(e);
+          inspectModeEnabled = isHotkeyDown;
+        }
+      });
+
+      editor.getJavaTextArea().addMouseWheelListener(new MouseAdapter() {
+        @Override
+        public void mouseWheelMoved(MouseWheelEvent e) {
+          // Editor was scrolled while mouse 1 was pressed, disable
+          if (isMouse1Down) inspectModeEnabled = false;
         }
       });
 
       editor.getJavaTextArea().addKeyListener(new KeyAdapter() {
         @Override
         public void keyPressed(KeyEvent e) {
-          isMetaDown = isMetaDown || e.getKeyCode() == KeyEvent.VK_META;
-          isCtrlDown = isCtrlDown || e.getKeyCode() == KeyEvent.VK_CONTROL;
-          if (!inspectModeEnabled) checkInspectMode();
+          isHotkeyDown = isHotkeyDown || keyEventHotkeyTest.test(e);
+          // Enable if hotkey was just pressed and mouse 1 is not down
+          inspectModeEnabled = inspectModeEnabled || (!isMouse1Down && isHotkeyDown);
         }
 
         @Override
         public void keyReleased(KeyEvent e) {
-          isMetaDown = isMetaDown && e.getKeyCode() != KeyEvent.VK_META;
-          isCtrlDown = isCtrlDown && e.getKeyCode() != KeyEvent.VK_CONTROL;
-          if (inspectModeEnabled) checkInspectMode();
+          isHotkeyDown = isHotkeyDown && !keyEventHotkeyTest.test(e);
+          // Disable if hotkey was just released
+          inspectModeEnabled = inspectModeEnabled && isHotkeyDown;
         }
       });
 
-    }
-
-
-    void checkInspectMode() {
-      inspectModeEnabled = !isMouseDown && (isCtrlDown && !Platform.isMacOS()) || isMetaDown;
     }
 
 
@@ -988,21 +1028,41 @@ public class PDEX {
     private ScheduledExecutorService scheduler;
     private volatile ScheduledFuture<?> scheduledUiUpdate = null;
     private volatile long nextUiUpdate = 0;
+    private volatile boolean enabled = true;
 
     private final Consumer<PreprocessedSketch> errorHandlerListener = this::handleSketchProblems;
 
     private JavaEditor editor;
+    private PreprocessingService pps;
 
 
     public ErrorChecker(JavaEditor editor, PreprocessingService pps) {
       this.editor = editor;
+      this.pps = pps;
       scheduler = Executors.newSingleThreadScheduledExecutor();
-      pps.registerListener(errorHandlerListener);
+      this.enabled = JavaMode.errorCheckEnabled;
+      if (enabled) {
+        pps.registerListener(errorHandlerListener);
+      }
     }
 
 
     public void notifySketchChanged() {
       nextUiUpdate = System.currentTimeMillis() + DELAY_BEFORE_UPDATE;
+    }
+
+
+    public void preferencesChanged() {
+      if (enabled != JavaMode.errorCheckEnabled) {
+        enabled = JavaMode.errorCheckEnabled;
+        if (enabled) {
+          pps.registerListener(errorHandlerListener);
+        } else {
+          pps.unregisterListener(errorHandlerListener);
+          editor.setProblemList(Collections.emptyList());
+          nextUiUpdate = 0;
+        }
+      }
     }
 
 
@@ -1033,7 +1093,7 @@ public class PDEX {
             SketchInterval in = ps.mapJavaToSketch(start, stop);
             if (in == SketchInterval.BEFORE_START) return null;
             int line = ps.tabOffsetToTabLine(in.tabIndex, in.startTabOffset);
-            Problem p = new Problem(iproblem, in.tabIndex, line);
+            JavaProblem p = new JavaProblem(iproblem, in.tabIndex, line);
             p.setPDEOffsets(in.startTabOffset, in.stopTabOffset);
             return p;
           })
@@ -1045,13 +1105,13 @@ public class PDEX {
         Map<String, List<Problem>> undefinedTypeProblems = problems.stream()
             // Get only problems with undefined types/names
             .filter(p -> {
-              int id = p.getIProblem().getID();
+              int id = ((JavaProblem) p).getIProblem().getID();
               return id == IProblem.UndefinedType ||
                   id == IProblem.UndefinedName ||
                   id == IProblem.UnresolvedVariable;
             })
             // Group problems by the missing type/name
-            .collect(Collectors.groupingBy(p -> p.getIProblem().getArguments()[0]));
+            .collect(Collectors.groupingBy(p -> ((JavaProblem) p).getIProblem().getArguments()[0]));
 
         if (!undefinedTypeProblems.isEmpty()) {
           final ClassPath cp = ps.searchClassPath;
@@ -1062,7 +1122,7 @@ public class PDEX {
                 String missingClass = entry.getKey();
                 List<Problem> affectedProblems = entry.getValue();
                 String[] suggestions = getImportSuggestions(cp, missingClass);
-                affectedProblems.forEach(p -> p.setImportSuggestions(suggestions));
+                affectedProblems.forEach(p -> ((JavaProblem) p).setImportSuggestions(suggestions));
               });
         }
       }

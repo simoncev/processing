@@ -59,16 +59,7 @@
 
   <!-- Switching to 8 because updates for 7 ended April 2015 -->
   <property name="jdk.version" value="8" />
-
-  <!-- temporarily work around performance regression on ARM -->
-  <condition property="jdk.update" value="77">
-    <equals arg1="${linux-arm32}" arg2="linux-arm32" />
-  </condition>
-  <condition property="jdk.build" value="3">
-    <equals arg1="${linux-arm32}" arg2="linux-arm32" />
-  </condition>
-
-  <property name="jdk.update" value="92" />
+  <property name="jdk.update" value="102" />
   <property name="jdk.build" value="14" />
 
   <property name="jdk.short" value="${jdk.version}u${jdk.update}" />
@@ -471,7 +462,9 @@
 
   <target name="macosx-clean" depends="subprojects-clean" description="Clean Mac OS X build">
     <delete dir="macosx/work" />
-    <delete file="macosx/processing-*.dmg" />
+    <delete>
+      <fileset dir="macosx" includes="processing-*zip" />
+    </delete>
   </target>
   
   <target name="macosx-check-os" unless="macosx">
@@ -565,6 +558,9 @@
 
       <!-- avoid conflicts with JNA DLLs already in the path -->
       <option value="-Djna.nosys=true" />
+
+      <!-- deal with jokers who install JOGL, ANTLR, etc system-wide -->
+      <option value="-Djava.ext.dirs=$APP_ROOT/Contents/PlugIns/jdk${jdk.esoteric}.jdk/Contents/Home/jre/lib/ext" />
 
       <option value="-Dapple.laf.useScreenMenuBar=true" />
       <option value="-Dcom.apple.macos.use-file-dialog-packages=true" />
@@ -736,8 +732,8 @@
   <!-- - - - - - - - -->
   
   <target name="linux-clean" depends="subprojects-clean" description="Clean linux version">
+    <delete dir="linux/work" />
     <delete>
-      <fileset dir="linux" includes="work" />
       <fileset dir="linux" includes="processing-*tgz" />
     </delete>
   </target>
@@ -833,11 +829,11 @@
     -->
 
     <!-- use the jre subfolder when having downloaded a JDK file -->
-    <condition property="jre.dir" value="jdk${jdk.esoteric}/jre/">
+    <condition property="jre.dir" value="jdk${jdk.esoteric}/jre">
       <!-- property might not be set, but it is for arm -->
       <equals arg1="${jre.download.jdk}" arg2="true" />
     </condition>
-    <condition property="jre.dir" value="jre${jdk.esoteric}/">
+    <condition property="jre.dir" value="jre${jdk.esoteric}">
       <not>
         <equals arg1="${jre.download.jdk}" arg2="true" />
       </not>
@@ -846,8 +842,8 @@
     <exec executable="rsync" dir="linux">
       <arg value="-a" />
       <arg value="--delete" />
-      <arg value="${jre.dir}" />
-      <arg value="work/java" />
+      <arg value="${jre.dir}/" />
+      <arg value="work/java/" />
     </exec>
 
     <delete dir="linux/jre${jdk.esoteric}" failonerror="false" />
@@ -1010,8 +1006,8 @@
   
   <target name="windows-clean" depends="subprojects-clean"
           description="Clean windows version">
+    <delete dir="windows/work" />
     <delete>
-      <fileset dir="windows" includes="work" />
       <fileset dir="windows" includes="processing-*zip" />
     </delete>
   </target>

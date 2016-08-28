@@ -3,7 +3,7 @@
 /*
   Part of the Processing project - http://processing.org
 
-  Copyright (c) 2012-15 The Processing Foundation
+  Copyright (c) 2012-16 The Processing Foundation
   Copyright (c) 2004-12 Ben Fry and Casey Reas
   Copyright (c) 2001-04 Massachusetts Institute of Technology
 
@@ -55,9 +55,9 @@ import processing.data.StringList;
 public class Base {
   // Added accessors for 0218 because the UpdateCheck class was not properly
   // updating the values, due to javac inlining the static final values.
-  static private final int REVISION = 250;
+  static private final int REVISION = 253;
   /** This might be replaced by main() if there's a lib/version.txt file. */
-  static private String VERSION_NAME = "0250"; //$NON-NLS-1$
+  static private String VERSION_NAME = "0253"; //$NON-NLS-1$
   /** Set true if this a proper release rather than a numbered revision. */
 
   /** True if heavy debugging error/log messages are enabled */
@@ -885,14 +885,16 @@ public class Base {
   /**
    * The call has already checked to make sure this sketch is not modified,
    * now change the mode.
+   * @return true if mode is changed.
    */
-  public void changeMode(Mode mode) {
-    if (activeEditor.getMode() != mode) {
+  public boolean changeMode(Mode mode) {
+    Mode oldMode = activeEditor.getMode();
+    if (oldMode != mode) {
       Sketch sketch = activeEditor.getSketch();
       nextMode = mode;
 
       if (sketch.isUntitled()) {
-        // If no changes have been made, just close and start fresh.
+        // The current sketch is empty, just close and start fresh.
         // (Otherwise the editor would lose its 'untitled' status.)
         handleClose(activeEditor, true);
         handleNew();
@@ -901,20 +903,30 @@ public class Base {
         // If the current editor contains file extensions that the new mode can handle, then
         // write a sketch.properties file with the new mode specified, and reopen.
         boolean newModeCanHandleCurrentSource = true;
-        for (final SketchCode code: sketch.getCode()) {
+        for (final SketchCode code : sketch.getCode()) {
           if (!mode.validExtension(code.getExtension())) {
             newModeCanHandleCurrentSource = false;
             break;
           }
         }
-        if (newModeCanHandleCurrentSource) {
+        if (!newModeCanHandleCurrentSource) {
+          return false;
+        } else {
           final File props = new File(sketch.getCodeFolder(), "sketch.properties");
           saveModeSettings(props, nextMode);
           handleClose(activeEditor, true);
-          handleOpen(sketch.getMainFilePath());
+          Editor editor = handleOpen(sketch.getMainFilePath());
+          if (editor == null) {
+            // the Mode change failed (probably code that's out of date)
+            // re-open the sketch using the mode we were in before
+            saveModeSettings(props, oldMode);
+            handleOpen(sketch.getMainFilePath());
+            return false;
+          }
         }
       }
     }
+    return true;
   }
 
 
@@ -1082,12 +1094,17 @@ public class Base {
       // Make the directory for the new sketch
       newbieDir.mkdirs();
 
+      // Add any template files from the Mode itself
+      File newbieFile = nextMode.addTemplateFiles(newbieDir, newbieName);
+
+      /*
       // Make an empty pde file
       File newbieFile =
         new File(newbieDir, newbieName + "." + nextMode.getDefaultExtension()); //$NON-NLS-1$
       if (!newbieFile.createNewFile()) {
         throw new IOException(newbieFile + " already exists.");
       }
+      */
 
       // Create sketch properties file if it's not the default mode.
       if (!nextMode.equals(getDefaultMode())) {
@@ -1274,6 +1291,31 @@ public class Base {
                              "Try updating the Mode or contact its author for a new version.", t, false);
         }
       }
+      if (editors.isEmpty()) {
+        Mode defaultMode = getDefaultMode();
+        if (nextMode == defaultMode) {
+          // unreachable? hopefully?
+          Messages.showError("Editor Problems",
+                             "An error occurred while trying to change modes.\n" +
+                             "We'll have to quit for now because it's an\n" +
+                             "unfortunate bit of indigestion with the default Mode.",
+                             null);
+        } else {
+          // Don't leave the user hanging or the PDE locked up
+          // https://github.com/processing/processing/issues/4467
+          if (untitled) {
+            nextMode = defaultMode;
+            handleNew();
+            return null;  // ignored by any caller
+
+          } else {
+            // This null response will be kicked back to changeMode(),
+            // signaling it to re-open the sketch in the default Mode.
+            return null;
+          }
+        }
+      }
+
       /*
         if (editors.isEmpty()) {
           // if the bad mode is the default mode, don't go into an infinite loop
@@ -1832,6 +1874,7 @@ public class Base {
     getSketchbookToolsFolder().mkdirs();
     getSketchbookModesFolder().mkdirs();
     getSketchbookExamplesFolder().mkdirs();
+    getSketchbookTemplatesFolder().mkdirs();
   }
 
 
@@ -1857,6 +1900,11 @@ public class Base {
 
   static public File getSketchbookExamplesFolder() {
     return new File(sketchbookFolder, "examples");
+  }
+
+
+  static public File getSketchbookTemplatesFolder() {
+    return new File(sketchbookFolder, "templates");
   }
 
 
